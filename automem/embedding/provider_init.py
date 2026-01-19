@@ -37,14 +37,16 @@ def init_embedding_provider(
     Priority order:
     1. Voyage API (if VOYAGE_API_KEY is set)
     2. OpenAI API (if OPENAI_API_KEY is set)
-    3. Ollama local server (if configured)
-    4. Local fastembed model (no API key needed)
-    5. Placeholder hash-based embeddings (fallback)
+    3. Gemini API (if GEMINI_API_KEY is set)
+    4. Ollama local server (if configured)
+    5. Local fastembed model (no API key needed)
+    6. Placeholder hash-based embeddings (fallback)
 
     Can be controlled via EMBEDDING_PROVIDER env var:
-    - "auto" (default): Try Voyage, then OpenAI, then Ollama, then fastembed, then placeholder
+    - "auto" (default): Try Voyage, then OpenAI, then Gemini, then Ollama, then fastembed, then placeholder
     - "voyage": Use Voyage only, fail if unavailable
     - "openai": Use OpenAI only, fail if unavailable
+    - "gemini": Use Gemini only, fail if unavailable
     - "local": Use fastembed only, fail if unavailable
     - "ollama": Use Ollama only, fail if unavailable
     - "placeholder": Use placeholder embeddings
@@ -95,6 +97,22 @@ def init_embedding_provider(
             return
         except Exception as e:
             raise RuntimeError(f"Failed to initialize OpenAI provider: {e}") from e
+
+    elif provider_config == "gemini":
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("EMBEDDING_PROVIDER=gemini but GEMINI_API_KEY not set")
+        try:
+            from automem.embedding.gemini import GeminiEmbeddingProvider
+
+            task_type = os.getenv("GEMINI_TASK_TYPE", "RETRIEVAL_DOCUMENT")
+            state.embedding_provider = GeminiEmbeddingProvider(
+                api_key=api_key, dimension=vector_size, task_type=task_type
+            )
+            logger.info("Embedding provider: %s", state.embedding_provider.provider_name())
+            return
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize Gemini provider: {e}") from e
 
     elif provider_config == "local":
         try:
@@ -177,7 +195,27 @@ def init_embedding_provider(
                 return
             except Exception as e:
                 logger.warning(
-                    "Failed to initialize OpenAI provider, trying local model: %s", str(e)
+                    "Failed to initialize OpenAI provider, trying Gemini: %s", str(e)
+                )
+
+        # Try Gemini
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if gemini_key:
+            try:
+                from automem.embedding.gemini import GeminiEmbeddingProvider
+
+                task_type = os.getenv("GEMINI_TASK_TYPE", "RETRIEVAL_DOCUMENT")
+                state.embedding_provider = GeminiEmbeddingProvider(
+                    api_key=gemini_key, dimension=vector_size, task_type=task_type
+                )
+                logger.info(
+                    "Embedding provider (auto-selected): %s",
+                    state.embedding_provider.provider_name(),
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    "Failed to initialize Gemini provider, trying Ollama: %s", str(e)
                 )
 
         ollama_base_url = os.getenv("OLLAMA_BASE_URL")
@@ -230,7 +268,7 @@ def init_embedding_provider(
         state.embedding_provider = PlaceholderEmbeddingProvider(dimension=vector_size)
         logger.warning(
             "Using placeholder embeddings (no semantic search). "
-            "Install fastembed or set VOYAGE_API_KEY/OPENAI_API_KEY for semantic embeddings."
+            "Install fastembed or set VOYAGE_API_KEY/OPENAI_API_KEY/GEMINI_API_KEY for semantic embeddings."
         )
         logger.info(
             "Embedding provider (auto-selected): %s", state.embedding_provider.provider_name()
@@ -240,5 +278,5 @@ def init_embedding_provider(
     # Invalid config
     raise ValueError(
         f"Invalid EMBEDDING_PROVIDER={provider_config}. "
-        f"Valid options: auto, voyage, openai, local, ollama, placeholder"
+        f"Valid options: auto, voyage, openai, gemini, local, ollama, placeholder"
     )
