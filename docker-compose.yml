@@ -5,7 +5,7 @@ services:
     image: falkordb/falkordb:latest
     ports:
       - "6379:6379" # Redis/FalkorDB
-      - "3000:3000" # Browser UI
+      # Browser UI disabled to avoid port conflicts
     volumes:
       - falkordb_data:/data # Persistent data
       - ./backups/falkordb:/backups # Local backups

@@ -5,6 +5,7 @@ qdrant-client==1.11.3
 python-dotenv==1.0.1
 python-dateutil==2.9.0
 openai==1.55.3
+google-genai>=1.0.0  # Google Gemini API for embeddings
 spacy==3.8.7
 requests==2.31.0
 fastembed==0.4.2

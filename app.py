@@ -1180,12 +1180,14 @@ def init_embedding_provider() -> None:
 
     Priority order:
     1. OpenAI API (if OPENAI_API_KEY is set)
-    2. Local fastembed model (no API key needed)
-    3. Placeholder hash-based embeddings (fallback)
+    2. Gemini API (if GEMINI_API_KEY is set)
+    3. Local fastembed model (no API key needed)
+    4. Placeholder hash-based embeddings (fallback)
 
     Can be controlled via EMBEDDING_PROVIDER env var:
-    - "auto" (default): Try OpenAI, then fastembed, then placeholder
+    - "auto" (default): Try OpenAI, then Gemini, then fastembed, then placeholder
     - "openai": Use OpenAI only, fail if unavailable
+    - "gemini": Use Gemini only, fail if unavailable
     - "local": Use fastembed only, fail if unavailable
     - "placeholder": Use placeholder embeddings
     """
@@ -1215,6 +1217,22 @@ def init_embedding_provider() -> None:
         except Exception as e:
             raise RuntimeError(f"Failed to initialize OpenAI provider: {e}") from e
 
+    elif provider_config == "gemini":
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise RuntimeError("EMBEDDING_PROVIDER=gemini but GEMINI_API_KEY not set")
+        try:
+            from automem.embedding.gemini import GeminiEmbeddingProvider
+
+            task_type = os.getenv("GEMINI_TASK_TYPE", "RETRIEVAL_DOCUMENT")
+            state.embedding_provider = GeminiEmbeddingProvider(
+                api_key=api_key, dimension=vector_size, task_type=task_type
+            )
+            logger.info("Embedding provider: %s", state.embedding_provider.provider_name())
+            return
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize Gemini provider: {e}") from e
+
     elif provider_config == "local":
         try:
             from automem.embedding.fastembed import FastEmbedProvider
@@ -1232,7 +1250,7 @@ def init_embedding_provider() -> None:
         logger.info("Embedding provider: %s", state.embedding_provider.provider_name())
         return
 
-    # Auto-selection: Try OpenAI → fastembed → placeholder
+    # Auto-selection: Try OpenAI → Gemini → fastembed → placeholder
     if provider_config == "auto":
         # Try OpenAI first
         api_key = os.getenv("OPENAI_API_KEY")
@@ -1250,7 +1268,27 @@ def init_embedding_provider() -> None:
                 return
             except Exception as e:
                 logger.warning(
-                    "Failed to initialize OpenAI provider, trying local model: %s", str(e)
+                    "Failed to initialize OpenAI provider, trying Gemini: %s", str(e)
+                )
+
+        # Try Gemini second
+        gemini_key = os.getenv("GEMINI_API_KEY")
+        if gemini_key:
+            try:
+                from automem.embedding.gemini import GeminiEmbeddingProvider
+
+                task_type = os.getenv("GEMINI_TASK_TYPE", "RETRIEVAL_DOCUMENT")
+                state.embedding_provider = GeminiEmbeddingProvider(
+                    api_key=gemini_key, dimension=vector_size, task_type=task_type
+                )
+                logger.info(
+                    "Embedding provider (auto-selected): %s",
+                    state.embedding_provider.provider_name(),
+                )
+                return
+            except Exception as e:
+                logger.warning(
+                    "Failed to initialize Gemini provider, trying local model: %s", str(e)
                 )
 
         # Try local fastembed
@@ -1271,7 +1309,7 @@ def init_embedding_provider() -> None:
         state.embedding_provider = PlaceholderEmbeddingProvider(dimension=vector_size)
         logger.warning(
             "Using placeholder embeddings (no semantic search). "
-            "Install fastembed or set OPENAI_API_KEY for semantic embeddings."
+            "Install fastembed or set OPENAI_API_KEY/GEMINI_API_KEY for semantic embeddings."
         )
         logger.info(
             "Embedding provider (auto-selected): %s", state.embedding_provider.provider_name()
@@ -1281,7 +1319,7 @@ def init_embedding_provider() -> None:
     # Invalid config
     raise ValueError(
         f"Invalid EMBEDDING_PROVIDER={provider_config}. "
-        f"Valid options: auto, openai, local, placeholder"
+        f"Valid options: auto, openai, gemini, local, placeholder"
     )
 
 

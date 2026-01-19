@@ -2,6 +2,7 @@
 
 Provides abstraction over different embedding backends:
 - OpenAI (API-based, requires key)
+- Gemini (API-based, requires key)
 - FastEmbed (local model, no API key needed)
 - Placeholder (hash-based fallback)
 """
@@ -14,6 +15,10 @@ try:
 except ImportError:
     OpenAIEmbeddingProvider = None  # type: ignore[assignment]
 try:
+    from .gemini import GeminiEmbeddingProvider  # type: ignore
+except ImportError:
+    GeminiEmbeddingProvider = None  # type: ignore[assignment]
+try:
     from .fastembed import FastEmbedProvider  # type: ignore
 except ImportError:
     FastEmbedProvider = None  # type: ignore[assignment]
@@ -22,6 +27,7 @@ from .placeholder import PlaceholderEmbeddingProvider
 __all__ = [
     "EmbeddingProvider",
     "FastEmbedProvider",
+    "GeminiEmbeddingProvider",
     "OpenAIEmbeddingProvider",
     "PlaceholderEmbeddingProvider",
 ]
