@@ -1,0 +1,275 @@
+name: Sync Upstream and Auto-Merge
+
+on:
+  schedule:
+    # Run daily at 6 AM UTC
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+    inputs:
+      force_sync:
+        description: 'Force sync even if no changes detected'
+        required: false
+        default: 'false'
+
+env:
+  UPSTREAM_REPO: verygoodplugins/automem
+  PROTECTED_FILES: |
+    automem/embedding/gemini.py
+    .env.example
+
+jobs:
+  check-upstream:
+    runs-on: ubuntu-latest
+    outputs:
+      has_changes: ${{ steps.check.outputs.has_changes }}
+      commit_count: ${{ steps.check.outputs.commit_count }}
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Add upstream remote
+        run: |
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
+          git fetch upstream main
+
+      - name: Check for upstream changes
+        id: check
+        run: |
+          BEHIND=$(git rev-list --count HEAD..upstream/main)
+          echo "Commits behind upstream: $BEHIND"
+          echo "commit_count=$BEHIND" >> $GITHUB_OUTPUT
+          if [ "$BEHIND" -gt 0 ] || [ "${{ github.event.inputs.force_sync }}" == "true" ]; then
+            echo "has_changes=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+  analyze-and-merge:
+    needs: check-upstream
+    if: needs.check-upstream.outputs.has_changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream and fetch
+        run: |
+          git remote add upstream https://github.com/${{ env.UPSTREAM_REPO }}.git
+          git fetch upstream main
+
+      - name: Generate diff for analysis
+        id: diff
+        run: |
+          # Get the diff
+          git diff HEAD..upstream/main > /tmp/upstream_changes.diff
+
+          # Get changed files list
+          git diff --name-only HEAD..upstream/main > /tmp/changed_files.txt
+
+          # Check if our Gemini files are affected
+          GEMINI_AFFECTED=false
+          if grep -q "automem/embedding" /tmp/changed_files.txt; then
+            GEMINI_AFFECTED=true
+          fi
+          if grep -q "app.py" /tmp/changed_files.txt; then
+            # Check if embedding provider section is modified
+            if git diff HEAD..upstream/main -- app.py | grep -q "init_embedding_provider\|EMBEDDING_PROVIDER"; then
+              GEMINI_AFFECTED=true
+            fi
+          fi
+
+          echo "gemini_affected=$GEMINI_AFFECTED" >> $GITHUB_OUTPUT
+
+          # Get commit messages
+          git log --oneline HEAD..upstream/main > /tmp/commit_messages.txt
+
+          echo "=== Changed Files ==="
+          cat /tmp/changed_files.txt
+          echo ""
+          echo "=== Commits ==="
+          cat /tmp/commit_messages.txt
+
+      - name: Analyze changes with Claude
+        id: analyze
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          # Create analysis prompt
+          cat > /tmp/analysis_prompt.txt << 'PROMPT_END'
+          You are reviewing upstream changes to the AutoMem repository before they are merged into a fork.
+
+          This fork has custom modifications:
+          1. Added Gemini embedding provider (automem/embedding/gemini.py)
+          2. Modified app.py to support EMBEDDING_PROVIDER=gemini
+          3. Modified automem/embedding/__init__.py to import GeminiEmbeddingProvider
+          4. Updated requirements.txt with google-genai
+          5. Updated .env.example with Gemini config options
+
+          Analyze the upstream changes and determine:
+          1. Are there any security concerns? (malicious code, credential exposure, etc.)
+          2. Will these changes conflict with the Gemini embedding provider?
+          3. Do any changes to app.py affect the init_embedding_provider() function?
+          4. Are there any breaking changes that need manual intervention?
+
+          Respond with a JSON object:
+          {
+            "safe_to_merge": true/false,
+            "security_concerns": ["list of concerns or empty"],
+            "gemini_conflicts": ["list of conflicts or empty"],
+            "breaking_changes": ["list or empty"],
+            "merge_strategy": "auto" | "manual" | "reject",
+            "summary": "brief summary of changes",
+            "recommendations": ["any recommendations"]
+          }
+
+          CHANGES TO ANALYZE:
+          PROMPT_END
+
+          # Append the diff (truncated if too large)
+          head -c 50000 /tmp/upstream_changes.diff >> /tmp/analysis_prompt.txt
+
+          # Call Claude API
+          RESPONSE=$(curl -s https://api.anthropic.com/v1/messages \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: $ANTHROPIC_API_KEY" \
+            -H "anthropic-version: 2023-06-01" \
+            -d "{
+              \"model\": \"claude-sonnet-4-20250514\",
+              \"max_tokens\": 1024,
+              \"messages\": [{
+                \"role\": \"user\",
+                \"content\": $(cat /tmp/analysis_prompt.txt | jq -Rs .)
+              }]
+            }")
+
+          # Extract the text response
+          ANALYSIS=$(echo "$RESPONSE" | jq -r '.content[0].text // "ERROR: No response"')
+          echo "Claude Analysis:"
+          echo "$ANALYSIS"
+
+          # Parse the JSON response
+          SAFE_TO_MERGE=$(echo "$ANALYSIS" | jq -r '.safe_to_merge // false')
+          MERGE_STRATEGY=$(echo "$ANALYSIS" | jq -r '.merge_strategy // "manual"')
+
+          echo "safe_to_merge=$SAFE_TO_MERGE" >> $GITHUB_OUTPUT
+          echo "merge_strategy=$MERGE_STRATEGY" >> $GITHUB_OUTPUT
+
+          # Save full analysis for the PR
+          echo "$ANALYSIS" > /tmp/analysis_result.json
+
+      - name: Create sync branch
+        if: steps.analyze.outputs.safe_to_merge == 'true'
+        run: |
+          BRANCH_NAME="sync-upstream-$(date +%Y%m%d-%H%M%S)"
+          git checkout -b $BRANCH_NAME
+
+          # Merge upstream with our changes taking precedence for conflicts
+          git merge upstream/main -m "Merge upstream changes" --no-edit || {
+            # If there are conflicts, try to resolve automatically for our protected files
+            for file in automem/embedding/gemini.py; do
+              if [ -f "$file" ]; then
+                git checkout --ours "$file" 2>/dev/null || true
+                git add "$file" 2>/dev/null || true
+              fi
+            done
+
+            # For app.py, we need to be more careful - keep both changes
+            if git diff --name-only --diff-filter=U | grep -q "app.py"; then
+              echo "Conflict in app.py - needs manual resolution"
+              exit 1
+            fi
+
+            git commit -m "Merge upstream changes (auto-resolved conflicts)" || true
+          }
+
+          git push origin $BRANCH_NAME
+          echo "BRANCH_NAME=$BRANCH_NAME" >> $GITHUB_ENV
+
+      - name: Create Pull Request
+        if: steps.analyze.outputs.safe_to_merge == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          ANALYSIS=$(cat /tmp/analysis_result.json)
+          SUMMARY=$(echo "$ANALYSIS" | jq -r '.summary // "Upstream sync"')
+
+          PR_BODY="## Automated Upstream Sync
+
+          This PR merges changes from the upstream repository.
+
+          ### Claude Analysis
+
+          **Safe to merge:** $(echo "$ANALYSIS" | jq -r '.safe_to_merge')
+          **Merge strategy:** $(echo "$ANALYSIS" | jq -r '.merge_strategy')
+
+          **Summary:** $SUMMARY
+
+          #### Security Concerns
+          $(echo "$ANALYSIS" | jq -r '.security_concerns | if length == 0 then "None detected" else .[] end')
+
+          #### Gemini Conflicts
+          $(echo "$ANALYSIS" | jq -r '.gemini_conflicts | if length == 0 then "None detected" else .[] end')
+
+          #### Recommendations
+          $(echo "$ANALYSIS" | jq -r '.recommendations | if length == 0 then "None" else .[] end')
+
+          ---
+          *Analyzed by Claude on $(date -u +%Y-%m-%dT%H:%M:%SZ)*"
+
+          gh pr create \
+            --title "Sync upstream: $SUMMARY" \
+            --body "$PR_BODY" \
+            --head "$BRANCH_NAME" \
+            --base main
+
+      - name: Auto-merge if safe
+        if: steps.analyze.outputs.merge_strategy == 'auto'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Wait a moment for PR to be created
+          sleep 5
+
+          # Get the PR number
+          PR_NUMBER=$(gh pr list --head "$BRANCH_NAME" --json number -q '.[0].number')
+
+          if [ -n "$PR_NUMBER" ]; then
+            echo "Auto-merging PR #$PR_NUMBER"
+            gh pr merge $PR_NUMBER --merge --admin
+          fi
+
+      - name: Trigger deployment webhook
+        if: steps.analyze.outputs.merge_strategy == 'auto'
+        run: |
+          # Trigger local deployment if webhook is configured
+          if [ -n "${{ secrets.DEPLOY_WEBHOOK_URL }}" ]; then
+            curl -X POST "${{ secrets.DEPLOY_WEBHOOK_URL }}" \
+              -H "Content-Type: application/json" \
+              -H "X-Webhook-Secret: ${{ secrets.DEPLOY_WEBHOOK_SECRET }}" \
+              -d '{"action": "deploy", "source": "upstream-sync"}'
+          fi
+
+  notify-manual:
+    needs: [check-upstream, analyze-and-merge]
+    if: failure() || needs.analyze-and-merge.outputs.merge_strategy == 'manual'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create issue for manual review
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Manual review needed: Upstream sync" \
+            --body "The automated upstream sync requires manual intervention. Please review the changes and merge manually." \
+            --label "upstream-sync,needs-review"
