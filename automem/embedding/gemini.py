@@ -73,8 +73,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
                 self.task_type = task_type.upper()
             else:
                 logger.warning(
-                    "Unknown task_type '%s', using default (no task type). "
-                    "Valid options: %s",
+                    "Unknown task_type '%s', using default (no task type). " "Valid options: %s",
                     task_type,
                     list(GEMINI_TASK_TYPES.keys()),
                 )
@@ -107,6 +106,7 @@ class GeminiEmbeddingProvider(EmbeddingProvider):
             return embedding
 
         import math
+
         norm = math.sqrt(sum(x * x for x in embedding))
         if norm == 0:
             return embedding

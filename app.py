@@ -1267,9 +1267,7 @@ def init_embedding_provider() -> None:
                 )
                 return
             except Exception as e:
-                logger.warning(
-                    "Failed to initialize OpenAI provider, trying Gemini: %s", str(e)
-                )
+                logger.warning("Failed to initialize OpenAI provider, trying Gemini: %s", str(e))
 
         # Try Gemini second
         gemini_key = os.getenv("GEMINI_API_KEY")
