@@ -90,17 +90,47 @@ YOUR TASK:
 2. Check if they are SAFE (no malicious code, no credential exposure)
 3. Check if they CONFLICT with our Gemini setup
 4. If safe, merge the changes: git merge upstream/main
-5. Rebuild and restart: docker compose build flask-api && docker compose down && docker compose up -d
-6. Wait 10 seconds, then verify:
-   - curl http://localhost:8001/health returns healthy
-   - Docker logs show 'Embedding provider: gemini'
-   - Test store/recall works
-7. If ANY verification fails, ROLLBACK: git reset --hard $LOCAL && docker compose build flask-api && docker compose down && docker compose up -d
+5. Rebuild and restart Docker: docker compose build flask-api && docker compose down && docker compose up -d
+6. Wait 15 seconds for Flask API to stabilize
+7. Verify Flask API is healthy: curl http://localhost:8001/health
+8. CRITICAL: Restart the MCP server (it connects to Flask API and needs a fresh connection):
+   sudo systemctl restart automem-mcp
+9. Wait 5 seconds for MCP to initialize
+10. Verify EVERYTHING is working:
+    - curl http://localhost:8001/health returns healthy (Flask API)
+    - curl http://localhost:8082/health returns ok (MCP server)
+    - Docker logs show 'Embedding provider: gemini'
+
+11. AUTOMEM INTEGRATION TEST - Run this exact test sequence:
+    a. Store a test memory:
+       curl -X POST http://localhost:8001/memory \\
+         -H "Content-Type: application/json" \\
+         -H "X-API-Key: \$AUTOMEM_API_TOKEN" \\
+         -d '{"content": "Upstream sync test at TIMESTAMP", "tags": ["test", "sync"], "importance": 0.3}'
+       (Replace TIMESTAMP with current datetime)
+    b. Recall the memory:
+       curl "http://localhost:8001/recall?query=upstream+sync+test&limit=1" \\
+         -H "X-API-Key: \$AUTOMEM_API_TOKEN"
+    c. Verify the response contains the test memory content
+    d. Delete the test memory using the returned ID:
+       curl -X DELETE "http://localhost:8001/memory/MEMORY_ID" \\
+         -H "X-API-Key: \$AUTOMEM_API_TOKEN"
+
+12. If ANY verification fails, ROLLBACK:
+    git reset --hard $LOCAL && docker compose build flask-api && docker compose down && docker compose up -d && sudo systemctl restart automem-mcp
+
+13. WHATSAPP NOTIFICATION - After completing (success or failure), send status via clawdbot:
+    clawdbot message send --target +972548790112 --message "MESSAGE"
+
+    On SUCCESS: "✅ AutoMem upstream sync complete. Merged X commits. All tests passed. Services healthy."
+    On FAILURE: "❌ AutoMem upstream sync FAILED. Reason: [brief description]. Rolled back to previous state."
+    On NO CHANGES: This script won't run if no changes, so no notification needed.
 
 IMPORTANT:
 - If changes modify automem/embedding/ files, be extra careful about conflicts
 - If changes modify app.py init_embedding_provider(), verify our Gemini code survives
 - Report your findings and actions clearly
+- ALWAYS send the WhatsApp notification as the final step
 
 UPSTREAM CHANGES TO REVIEW:
 $(cat "$DIFF_FILE")
