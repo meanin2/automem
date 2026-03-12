@@ -42,3 +42,26 @@ def _build_qdrant_tag_filter(
     ]
 
     return qdrant_models.Filter(must=must_conditions)
+
+
+def _build_qdrant_bank_condition(bank: str):
+    """Build a Qdrant field condition for bank filtering."""
+    return qdrant_models.FieldCondition(
+        key="bank",
+        match=qdrant_models.MatchValue(value=bank),
+    )
+
+
+def _merge_qdrant_filters(
+    tag_filter: Optional[qdrant_models.Filter],
+    bank: Optional[str] = None,
+) -> Optional[qdrant_models.Filter]:
+    """Merge tag filter with bank filter into a single Qdrant Filter."""
+    conditions = []
+    if tag_filter and tag_filter.must:
+        conditions.extend(tag_filter.must)
+    if bank and bank != "default":
+        conditions.append(_build_qdrant_bank_condition(bank))
+    if not conditions:
+        return tag_filter  # Return original filter (may be None or have non-must conditions)
+    return qdrant_models.Filter(must=conditions)

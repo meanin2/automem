@@ -432,6 +432,17 @@ SEARCH_WEIGHT_EXACT = float(os.getenv("SEARCH_WEIGHT_EXACT", "0.2"))
 SEARCH_WEIGHT_RELATION = float(os.getenv("SEARCH_WEIGHT_RELATION", "0.25"))
 SEARCH_WEIGHT_RELEVANCE = float(os.getenv("SEARCH_WEIGHT_RELEVANCE", "0.0"))
 
+# Token-aware recall (Feature 1)
+RECALL_DEFAULT_MAX_TOKENS = int(os.getenv("RECALL_DEFAULT_MAX_TOKENS", "0"))  # 0 = unlimited
+
+# Cross-encoder reranking (Feature 2)
+RERANK_ENABLED = os.getenv("RERANK_ENABLED", "false").lower() not in {"0", "false", "no"}
+RERANK_MODEL = os.getenv("RERANK_MODEL", "ms-marco-MiniLM-L-12-v2")
+RERANK_TOP_K_MULTIPLIER = float(os.getenv("RERANK_TOP_K_MULTIPLIER", "3.0"))
+
+# Memory banks / namespaces (Feature 3)
+DEFAULT_MEMORY_BANK = os.getenv("DEFAULT_MEMORY_BANK", "default")
+
 # API tokens
 API_TOKEN = os.getenv("AUTOMEM_API_TOKEN")
 ADMIN_TOKEN = os.getenv("ADMIN_API_TOKEN")

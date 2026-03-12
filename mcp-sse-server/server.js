@@ -277,7 +277,8 @@ export class AutoMemClient {
       t_valid: args.t_valid,
       t_invalid: args.t_invalid,
       updated_at: args.updated_at,
-      last_accessed: args.last_accessed
+      last_accessed: args.last_accessed,
+      bank: args.bank
     };
     const r = await this._request('POST', 'memory', body, options);
     return { memory_id: r.memory_id || r.id, message: r.message || 'Memory stored successfully' };
@@ -306,6 +307,9 @@ export class AutoMemClient {
     if (args.expand_min_importance !== undefined) p.set('expand_min_importance', String(args.expand_min_importance));
     if (args.expand_min_strength !== undefined) p.set('expand_min_strength', String(args.expand_min_strength));
 
+    if (args.bank) p.set('bank', args.bank);
+    if (args.max_tokens !== undefined) p.set('max_tokens', String(args.max_tokens));
+    if (args.rerank !== undefined) p.set('rerank', String(!!args.rerank));
     if (args.context) p.set('context', args.context);
     if (args.language) p.set('language', args.language);
     if (args.active_path) p.set('active_path', args.active_path);
@@ -434,6 +438,7 @@ export function buildMcpServer(client) {
           embedding: { type: 'array', items: { type: 'number' }, description: 'Pre-computed embedding vector (auto-generated if omitted)' },
           updated_at: { type: 'string', description: 'ISO 8601 last-updated timestamp' },
           last_accessed: { type: 'string', description: 'ISO 8601 last-accessed timestamp' },
+          bank: { type: 'string', description: 'Memory bank/namespace for isolation (default: "default")' }
         },
         required: ['content']
       }
@@ -475,6 +480,10 @@ export function buildMcpServer(client) {
           context_tags: { type: 'array', items: { type: 'string' }, description: 'Priority tags to boost in results' },
           context_types: { type: 'array', items: { type: 'string' }, description: 'Priority memory types to boost (Decision, Pattern, ...)' },
           priority_ids: { type: 'array', items: { type: 'string' }, description: 'Specific memory IDs to include/boost' },
+
+          bank: { type: 'string', description: 'Memory bank/namespace for isolation (default: "default")' },
+          max_tokens: { type: 'integer', minimum: 0, description: 'Maximum estimated tokens for results (0 = unlimited). Truncates results to fit LLM context windows.' },
+          rerank: { type: 'boolean', description: 'Enable cross-encoder reranking for better precision (requires flashrank)' },
 
           format: {
             type: 'string',

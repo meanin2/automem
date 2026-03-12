@@ -2,8 +2,30 @@
 
 import logging
 import os
+import re
 
 logger = logging.getLogger("automem.validation")
+
+_BANK_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
+
+
+def sanitize_bank_name(raw: str, default: str = "default") -> str:
+    """Validate and normalise a memory-bank name.
+
+    * Strips whitespace and lowercases.
+    * Returns *default* when the result is empty.
+    * Raises ``ValueError`` when the name doesn't match
+      ``^[a-z0-9][a-z0-9_-]{0,63}$``.
+    """
+    name = (raw or "").strip().lower()
+    if not name:
+        return default
+    if not _BANK_NAME_RE.match(name):
+        raise ValueError(
+            f"Invalid bank name {name!r}. "
+            "Must match ^[a-z0-9][a-z0-9_-]{{0,63}}$"
+        )
+    return name
 
 
 class VectorDimensionMismatchError(RuntimeError):

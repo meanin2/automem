@@ -10,12 +10,14 @@ from flask.typing import ResponseReturnValue
 
 from automem.config import (
     CLASSIFICATION_MODEL,
+    DEFAULT_MEMORY_BANK,
     MEMORY_AUTO_SUMMARIZE,
     MEMORY_CONTENT_HARD_LIMIT,
     MEMORY_CONTENT_SOFT_LIMIT,
     MEMORY_SUMMARY_TARGET_LENGTH,
 )
 from automem.utils.text import should_summarize_content, summarize_content
+from automem.utils.validation import sanitize_bank_name
 
 
 def _validate_memory_id(memory_id: str) -> None:
@@ -143,6 +145,10 @@ def create_memory_blueprint_full(
         tags_lower = [t.strip().lower() for t in tags if isinstance(t, str) and t.strip()]
         tag_prefixes = compute_tag_prefixes(tags_lower)
         importance = coerce_importance(payload.get("importance"))
+        try:
+            bank = sanitize_bank_name(payload.get("bank"), DEFAULT_MEMORY_BANK)
+        except ValueError as exc:
+            abort(400, description=str(exc))
         # Always generate server-side UUID to prevent collision/overwrite attacks
         memory_id = str(uuid.uuid4())
 
@@ -241,6 +247,7 @@ def create_memory_blueprint_full(
                     m.updated_at = $updated_at,
                     m.last_accessed = $last_accessed,
                     m.metadata = $metadata,
+                    m.bank = $bank,
                     m.processed = false
                 SET m.content = $content,
                     m.timestamp = $timestamp,
@@ -254,6 +261,7 @@ def create_memory_blueprint_full(
                     m.updated_at = $updated_at,
                     m.last_accessed = $last_accessed,
                     m.metadata = $metadata,
+                    m.bank = $bank,
                     m.processed = false
                 RETURN m
                 """,
@@ -271,6 +279,7 @@ def create_memory_blueprint_full(
                     "updated_at": updated_at,
                     "last_accessed": last_accessed,
                     "metadata": metadata_json,
+                    "bank": bank,
                 },
             )
         except Exception:
@@ -305,6 +314,7 @@ def create_memory_blueprint_full(
                                     "updated_at": updated_at,
                                     "last_accessed": last_accessed,
                                     "metadata": metadata,
+                                    "bank": bank,
                                 },
                             )
                         ],
@@ -334,6 +344,7 @@ def create_memory_blueprint_full(
             "embedding_status": embedding_status,
             "enrichment": "queued" if state.enrichment_queue else "disabled",
             "metadata": metadata,
+            "bank": bank,
             "timestamp": created_at,
             "updated_at": updated_at,
             "last_accessed": last_accessed,
@@ -412,6 +423,7 @@ def create_memory_blueprint_full(
 
         current_node = result.result_set[0][0]
         current = serialize_node(current_node)
+        bank = current.get("bank") or "default"
 
         new_content = payload.get("content", current.get("content"))
         tags = normalize_tag_list(payload.get("tags", current.get("tags")))
@@ -462,7 +474,8 @@ def create_memory_blueprint_full(
                 m.timestamp = $timestamp,
                 m.metadata = $metadata,
                 m.updated_at = $updated_at,
-                m.last_accessed = $last_accessed
+                m.last_accessed = $last_accessed,
+                m.bank = $bank
             RETURN m
         """
 
@@ -480,6 +493,7 @@ def create_memory_blueprint_full(
                 "metadata": metadata_json,
                 "updated_at": updated_at,
                 "last_accessed": last_accessed,
+                "bank": bank,
             },
         )
 
@@ -513,6 +527,7 @@ def create_memory_blueprint_full(
                     "updated_at": updated_at,
                     "last_accessed": last_accessed,
                     "metadata": metadata,
+                    "bank": bank,
                 }
                 try:
                     qdrant_client.upsert(
@@ -576,10 +591,15 @@ def create_memory_blueprint_full(
         if graph is None:
             abort(503, description="FalkorDB is unavailable")
 
-        params = {"tags": [tag.lower() for tag in tags], "limit": limit}
+        try:
+            bank = sanitize_bank_name(request.args.get("bank"), DEFAULT_MEMORY_BANK)
+        except ValueError as exc:
+            abort(400, description=str(exc))
+        params = {"tags": [tag.lower() for tag in tags], "limit": limit, "bank": bank}
         query = """
             MATCH (m:Memory)
             WHERE ANY(tag IN coalesce(m.tags, []) WHERE toLower(tag) IN $tags)
+              AND coalesce(m.bank, 'default') = $bank
             RETURN m
             ORDER BY m.importance DESC, m.timestamp DESC
             LIMIT $limit

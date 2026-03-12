@@ -172,6 +172,7 @@ from automem.config import (
     TYPE_ALIASES,
     VECTOR_SIZE,
     normalize_memory_type,
+    DEFAULT_MEMORY_BANK,
 )
 from automem.search.runtime_keywords import load_keyword_runtime
 from automem.search.runtime_recall_helpers import (
@@ -183,6 +184,7 @@ from automem.search.runtime_recall_helpers import (
 )
 from automem.search.runtime_relations import fetch_relations as _fetch_relations_runtime
 from automem.stores.graph_store import _build_graph_tag_predicate
+from automem.stores.vector_store import _merge_qdrant_filters
 from automem.stores.vector_store import _build_qdrant_tag_filter
 from automem.sync.runtime_bindings import create_sync_runtime
 from automem.utils.entity_extraction import (
@@ -192,6 +194,7 @@ from automem.utils.entity_extraction import (
     generate_summary,
 )
 from automem.utils.graph import _serialize_node, _summarize_relation_node
+from automem.utils.validation import sanitize_bank_name
 from automem.utils.scoring import _compute_metadata_score, _parse_metadata_field
 from automem.utils.tags import (
     _compute_tag_prefixes,

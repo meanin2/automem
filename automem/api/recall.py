@@ -11,16 +11,22 @@ from flask import Blueprint, abort, jsonify, request
 from automem.config import (
     COLLECTION_NAME,
     DEFAULT_EXPAND_RELATIONS,
+    DEFAULT_MEMORY_BANK,
     FILTERABLE_RELATIONS,
     RECALL_ADAPTIVE_FLOOR,
+    RECALL_DEFAULT_MAX_TOKENS,
     RECALL_EXPANSION_LIMIT,
     RECALL_MIN_SCORE,
     RECALL_RELATION_LIMIT,
+    RERANK_ENABLED,
+    RERANK_MODEL,
+    RERANK_TOP_K_MULTIPLIER,
     canonicalize_relation_type,
     expand_relation_query_types,
     normalize_relation_type,
 )
 from automem.utils.graph import _serialize_node
+from automem.utils.validation import sanitize_bank_name
 
 DEFAULT_STYLE_PRIORITY_TAGS: Set[str] = {
     "coding-style",
@@ -577,6 +583,7 @@ def _inject_priority_memories(
     limit: int,
     logger: Any,
     exclude_tags: Optional[List[str]] = None,
+    bank: str = "default",
 ) -> bool:
     injected = False
     priority_id_order: List[str] = context_profile.get("priority_id_order") or []
@@ -680,6 +687,7 @@ def _inject_priority_memories(
             tag_filters=tag_list,
             tag_mode=effective_tag_mode,
             tag_match=effective_tag_match,
+            bank=bank,
         )
         if priority_matches:
             filtered_priority = [
@@ -707,6 +715,7 @@ def _inject_priority_memories(
             effective_tag_match,
             fetch_limit,
             seen_ids,
+            bank,
         )
         if tag_results:
             filtered_results = [
@@ -846,6 +855,7 @@ def _expand_entity_memories(
     total_limit: int,
     logger: Any,
     additional_tag_filters: Optional[List[str]] = None,
+    bank: str = "default",
 ) -> List[Dict[str, Any]]:
     """
     Expand results by finding memories that mention entities found in seed results.
@@ -891,6 +901,7 @@ def _expand_entity_memories(
                 "prefix",  # tag_match
                 limit_per_entity,
                 seen_ids,
+                bank,
             )
         except Exception:
             logger.exception("Entity expansion search failed for %s", entity)
@@ -1174,6 +1185,24 @@ def handle_recall(
         requested_limit = 5
     limit = max(1, min(requested_limit, recall_max_limit))
 
+    # Token-aware recall
+    max_tokens_param = request.args.get("max_tokens")
+    max_tokens = RECALL_DEFAULT_MAX_TOKENS
+    if max_tokens_param is not None:
+        try:
+            max_tokens = max(0, int(max_tokens_param))
+        except (TypeError, ValueError):
+            max_tokens = RECALL_DEFAULT_MAX_TOKENS
+
+    # Cross-encoder reranking
+    rerank_param = _parse_bool_param(request.args.get("rerank"), RERANK_ENABLED)
+
+    # Memory bank filtering
+    try:
+        bank = sanitize_bank_name(request.args.get("bank"), DEFAULT_MEMORY_BANK)
+    except ValueError as exc:
+        abort(400, description=str(exc))
+
     embedding_param = request.args.get("embedding")
     time_query = request.args.get("time_query") or request.args.get("time")
     start_param = request.args.get("start")
@@ -1358,6 +1387,7 @@ def handle_recall(
                 tag_filters,
                 tag_mode,
                 tag_match,
+                bank,
             )
             if start_time or end_time or tag_filters or exclude_tags:
                 vector_matches = [
@@ -1381,6 +1411,7 @@ def handle_recall(
                 tag_filters=tag_filters,
                 tag_mode=tag_mode,
                 tag_match=tag_match,
+                bank=bank,
             )
             local_results.extend(graph_matches[:remaining_slots])
 
@@ -1397,6 +1428,7 @@ def handle_recall(
                 tag_match,
                 per_query_limit - len(local_results),
                 local_seen,
+                bank,
             )
             local_results.extend(tag_only_results)
 
@@ -1421,6 +1453,7 @@ def handle_recall(
                     per_query_limit,
                     logger,
                     exclude_tags,
+                    bank=bank,
                 )
 
         query_tokens = extract_keywords(query_str.lower()) if query_str else []
@@ -1553,6 +1586,28 @@ def handle_recall(
         deduped_results.sort(key=_time_sort_key, reverse=(sort_param == "updated_desc"))
     deduped_results = _guarantee_priority_results(deduped_results, any_context_profile, limit)
 
+    # When reranking, keep more candidates for the reranker to choose from
+    pre_rerank_limit = limit
+    if rerank_param and query_text:
+        pre_rerank_limit = max(limit, int(limit * RERANK_TOP_K_MULTIPLIER))
+    if len(deduped_results) > pre_rerank_limit:
+        deduped_results = deduped_results[:pre_rerank_limit]
+
+    # Cross-encoder reranking (before expansion and token truncation)
+    reranked = False
+    if rerank_param and query_text and len(deduped_results) > 1:
+        try:
+            from automem.utils.reranker import rerank_results
+            deduped_results = rerank_results(
+                query_text, deduped_results, model_name=RERANK_MODEL, top_k=limit
+            )
+            reranked = True
+        except Exception:
+            logger.warning("Reranking failed, using original ordering", exc_info=True)
+            # Fallback: trim to original limit
+            if len(deduped_results) > limit:
+                deduped_results = deduped_results[:limit]
+
     # Graph expansion feature (from upstream branch)
     seed_results = list(deduped_results)
     expansion_results: List[Dict[str, Any]] = []
@@ -1607,6 +1662,7 @@ def handle_recall(
             total_limit=expansion_limit,
             logger=logger,
             additional_tag_filters=tag_filters,  # Pass conversation tag filter
+            bank=bank,
         )
         if start_time or end_time or tag_filters or exclude_tags:
             entity_expansion_results = [
@@ -1657,6 +1713,23 @@ def handle_recall(
                     result["jit_enriched"] = True
                     jit_enriched_count += 1
 
+    # Token-aware truncation
+    total_before_truncation = len(results)
+    truncated = False
+    if max_tokens > 0:
+        truncated_results = []
+        cumulative_tokens = 0
+        _METADATA_OVERHEAD_TOKENS = 50
+        for r in results:
+            content_text = r.get("memory", {}).get("content", "")
+            est_tokens = len(content_text) // 4 + _METADATA_OVERHEAD_TOKENS
+            if cumulative_tokens + est_tokens > max_tokens and truncated_results:
+                truncated = True
+                break
+            truncated_results.append(r)
+            cumulative_tokens += est_tokens
+        results = truncated_results
+
     response = {
         "status": "success",
         "query": query_text,
@@ -1664,6 +1737,7 @@ def handle_recall(
         "count": len(results),
         "dedup_removed": dedup_removed,
         "sort": sort_param,
+        "bank": bank,
         "vector_search": {
             "enabled": qdrant_client is not None,
             "matched": bool(total_vector_matches),
@@ -1685,6 +1759,12 @@ def handle_recall(
                 _extract_entities_from_results(seed_results + expansion_results)
             )[:10],
         }
+    if reranked:
+        response["reranked"] = True
+    if max_tokens > 0:
+        response["max_tokens"] = max_tokens
+        response["truncated"] = truncated
+        response["total_before_truncation"] = total_before_truncation
     if is_multi:
         response["queries"] = queries_to_run
     if query_text and not is_multi:
@@ -1822,16 +1902,22 @@ def create_recall_blueprint(
             abort(503, description="FalkorDB is unavailable")
 
         try:
+            bank = sanitize_bank_name(request.args.get("bank"), DEFAULT_MEMORY_BANK)
+        except ValueError as exc:
+            abort(400, description=str(exc))
+
+        try:
             lesson_query = """
                 MATCH (m:Memory)
-                WHERE 'critical' IN m.tags OR 'lesson' IN m.tags OR 'ai-assistant' IN m.tags
+                WHERE ('critical' IN m.tags OR 'lesson' IN m.tags OR 'ai-assistant' IN m.tags)
+                  AND coalesce(m.bank, 'default') = $bank
                 RETURN m.id as id, m.content as content, m.tags as tags,
                        m.importance as importance, m.type as type, m.metadata as metadata
                 ORDER BY m.importance DESC
                 LIMIT 10
             """
 
-            lesson_results = graph.query(lesson_query)
+            lesson_results = graph.query(lesson_query, {"bank": bank})
             lessons = []
             if getattr(lesson_results, "result_set", None):
                 for row in lesson_results.result_set:
@@ -1848,12 +1934,13 @@ def create_recall_blueprint(
 
             system_query = """
                 MATCH (m:Memory)
-                WHERE 'system' IN m.tags OR 'memory-recall' IN m.tags
+                WHERE ('system' IN m.tags OR 'memory-recall' IN m.tags)
+                  AND coalesce(m.bank, 'default') = $bank
                 RETURN m.id as id, m.content as content, m.tags as tags
                 LIMIT 5
             """
 
-            system_results = graph.query(system_query)
+            system_results = graph.query(system_query, {"bank": bank})
             system_rules = []
             if getattr(system_results, "result_set", None):
                 for row in system_results.result_set:
